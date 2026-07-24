@@ -5,7 +5,7 @@ Architectural Decision Rationale:
 ---------------------------------
 1. Lifespan Context Manager: Standardized startup and shutdown lifecycle management using
    async context managers (`@asynccontextmanager`). Ensures logging, ConnectionManager, AudioStreamService,
-   and global services are initialized before accepting incoming traffic.
+   VADService, and global services are initialized before accepting incoming traffic.
 2. Centralized CORS Middleware: Configures `CORSMiddleware` using dynamic environment settings
    to allow secure cross-origin communication with future React frontends or mobile clients.
 3. Exception Handler Registration: Attaches custom handlers to convert unhandled exceptions
@@ -31,6 +31,7 @@ from app.core.exceptions import (
 from app.core.logging import get_logger, setup_logging
 from app.services.audio_stream_service import audio_stream_service
 from app.services.connection_manager import connection_manager
+from app.services.vad_service import vad_service
 
 # Obtain logger for application lifespan lifecycle events
 logger = get_logger("app.main")
@@ -43,14 +44,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """
     # Startup tasks
     setup_logging(log_level=settings.LOG_LEVEL, log_format=settings.LOG_FORMAT)
-    logger.info(
-        f"Starting {settings.APP_NAME} v{settings.APP_VERSION} in [{settings.ENV}] mode..."
-    )
+    logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION} in [{settings.ENV}] mode...")
 
-    # Initialize ConnectionManager & AudioStreamService
+    # Initialize ConnectionManager, AudioStreamService, & VADService
     await connection_manager.initialize()
     await audio_stream_service.initialize()
-    logger.info("WebSocket ConnectionManager and AudioStreamService initialized.")
+    await vad_service.initialize()
+    logger.info("WebSocket ConnectionManager, AudioStreamService, and VADService initialized.")
 
     yield
 

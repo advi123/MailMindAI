@@ -4,10 +4,10 @@ MailMind AI - Voice Session Model.
 Architectural Decision Rationale:
 ---------------------------------
 1. Session Isolation & Observability: Encapsulating socket metadata (session_id, timestamps,
-   activity status, audio buffer) into a dedicated VoiceSession model decouples socket lifecycle tracking
+   activity status, audio buffer, VAD state) into a dedicated VoiceSession model decouples socket lifecycle tracking
    from WebSocket transport logic.
-2. Per-Session Audio Buffer Ownership: Each VoiceSession owns exactly one independent `AudioBuffer` instance
-   instantiated via `default_factory=lambda: AudioBuffer()`. Guarantees state isolation across concurrent client streams.
+2. Per-Session VAD & Audio Isolation: Each VoiceSession owns an independent `AudioBuffer` and `VADSessionState`.
+   Guarantees strict state and memory isolation across concurrent client streams.
 """
 
 import uuid
@@ -18,11 +18,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.audio_buffer import AudioBuffer
+from app.models.vad_state import VADSessionState
 
 
 class SessionStatus(str, Enum):
     """Enumeration of active WebSocket connection states."""
-
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
     STALE = "stale"
@@ -32,7 +32,6 @@ class VoiceSession(BaseModel):
     """
     Data model representing a client's active voice conversation session.
     """
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     session_id: str = Field(
@@ -55,6 +54,10 @@ class VoiceSession(BaseModel):
         default_factory=lambda: AudioBuffer(),
         description="Dedicated raw audio memory buffer for this session",
     )
+    vad_state: VADSessionState = Field(
+        default_factory=lambda: VADSessionState(),
+        description="Dedicated Voice Activity Detection state machine for this session",
+    )
 
     @property
     def duration_seconds(self) -> float:
@@ -67,9 +70,10 @@ class VoiceSession(BaseModel):
         self.last_activity = datetime.now(timezone.utc)
 
     def close(self) -> None:
-        """Marks the session status as disconnected and clears session audio buffer memory."""
+        """Marks the session status as disconnected and resets session audio buffer and VAD state."""
         self.connection_status = SessionStatus.DISCONNECTED
         self.audio_buffer.clear()
+        self.vad_state.reset_session_vad()
 
     def to_dict(self) -> dict[str, Any]:
         """Returns JSON-serializable representation of session state."""
@@ -84,4 +88,5 @@ class VoiceSession(BaseModel):
                 "frame_count": self.audio_buffer.frame_count,
                 "duration_estimate": self.audio_buffer.duration_estimate(),
             },
+            "vad_metrics": self.vad_state.to_dict(),
         }

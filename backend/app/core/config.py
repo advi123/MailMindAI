@@ -9,8 +9,9 @@ Architectural Decision Rationale:
    If an environment variable is invalid, the application fails fast before accepting traffic.
 3. 12-Factor App Compliance: All configuration can be overridden via environment variables or `.env` files,
    making deployment seamless across dev, staging, and production environments.
+4. Voice Activity Detection (VAD) Tuning: Centralizes VAD parameters (energy threshold, silence timeout,
+   min/max speech durations) to enable fine-tuning of voice turn-taking responsiveness without code edits.
 """
-
 
 import json
 
@@ -46,6 +47,16 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
     ]
 
+    # Voice Activity Detection (VAD) Configuration
+    VAD_ENABLED: bool = True
+    VAD_ENERGY_THRESHOLD: float = 0.015  # Normalized RMS energy threshold (0.0 to 1.0)
+    VAD_SILENCE_THRESHOLD_MS: int = 800  # Silence duration (ms) to trigger UTTERANCE_COMPLETE
+    VAD_MIN_SPEECH_DURATION_MS: int = 250  # Minimum speech duration (ms) to trigger VOICE_STARTED
+    VAD_MAX_UTTERANCE_DURATION_MS: int = 15000  # Maximum utterance duration (ms) limit
+    VAD_SAMPLE_RATE: int = 16000  # PCM sample rate in Hz
+    VAD_BYTES_PER_SAMPLE: int = 2  # 16-bit PCM = 2 bytes/sample
+    VAD_CHANNELS: int = 1  # Mono audio
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
@@ -53,11 +64,15 @@ class Settings(BaseSettings):
         Parses JSON array strings or comma-separated lists from environment variables
         into a valid Python list of origins.
         """
-        if isinstance(v, str) and v.startswith("["):
-            try:
-                return json.loads(v)
-            except json.JSONDecodeError:
-                return [i.strip() for i in v.split(",") if i.strip()]
+        if isinstance(v, str):
+            if v.startswith("["):
+                try:
+                    return json.loads(v)
+                except json.JSONDecodeError:
+                    return [i.strip() for i in v.split(",") if i.strip()]
+
+            return [i.strip() for i in v.split(",") if i.strip()]        
+        
         return v
 
     model_config = SettingsConfigDict(
