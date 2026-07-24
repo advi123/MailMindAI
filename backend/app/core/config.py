@@ -9,8 +9,8 @@ Architectural Decision Rationale:
    If an environment variable is invalid, the application fails fast before accepting traffic.
 3. 12-Factor App Compliance: All configuration can be overridden via environment variables or `.env` files,
    making deployment seamless across dev, staging, and production environments.
-4. Voice Activity Detection (VAD) Tuning: Centralizes VAD parameters (energy threshold, silence timeout,
-   min/max speech durations) to enable fine-tuning of voice turn-taking responsiveness without code edits.
+4. Voice Activity Detection (VAD) & Speech-To-Text (STT) Tuning: Centralizes VAD and STT parameters
+   to enable fine-tuning of voice turn-taking and Whisper model inference without code edits.
 """
 
 import json
@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     VAD_BYTES_PER_SAMPLE: int = 2  # 16-bit PCM = 2 bytes/sample
     VAD_CHANNELS: int = 1  # Mono audio
 
+    # Speech-To-Text (STT) Configuration
+    GROQ_API_KEY: str = ""
+    STT_PROVIDER: str = "groq"
+    STT_MODEL: str = "whisper-large-v3-turbo"
+    STT_TIMEOUT: float = 30.0
+    STT_MAX_TRANSCRIPTION_SECONDS: float = 60.0
+    STT_LANGUAGE: str = "en"
+    STT_ENABLE_TRANSLATION: bool = False
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: str | list[str]) -> list[str]:
@@ -71,8 +80,8 @@ class Settings(BaseSettings):
                 except json.JSONDecodeError:
                     return [i.strip() for i in v.split(",") if i.strip()]
 
-            return [i.strip() for i in v.split(",") if i.strip()]        
-        
+            return [i.strip() for i in v.split(",") if i.strip()]
+
         return v
 
     model_config = SettingsConfigDict(

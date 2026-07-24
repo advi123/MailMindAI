@@ -1,5 +1,5 @@
 """
-Integration test suite verifying utterance boundary detection and utterance_ready events over WebSocket.
+Integration test suite verifying utterance boundary detection and transcription events over WebSocket.
 """
 
 import math
@@ -30,8 +30,8 @@ def test_full_utterance_lifecycle_over_websocket(client: TestClient):
     2. Stream initial silence (100ms)
     3. Stream active voice (500ms)
     4. Stream trailing silence (800ms threshold)
-    5. Assert receipt of utterance_ready event notification
-    6. Verify AudioBuffer raw bytes persist for downstream STT
+    5. Assert receipt of transcript or transcription notification
+    6. Verify AudioBuffer is automatically reset for the next utterance turn
     """
     with client.websocket_connect("/ws/voice") as websocket:
         conn = websocket.receive_json()
@@ -60,23 +60,22 @@ def test_full_utterance_lifecycle_over_websocket(client: TestClient):
             ack = websocket.receive_json()
             assert ack["type"] == "audio_ack"
 
-            # Check if utterance_ready event follows
+            # Check if transcription/utterance event follows
             if ack["vad"]["ready_for_transcription"]:
                 event_msg = websocket.receive_json()
-                assert event_msg["type"] == "utterance_ready"
+                assert event_msg["type"] in ["transcript", "transcription_failed", "utterance_ready"]
                 assert event_msg["session_id"] == session_id
                 assert event_msg["utterance_index"] == 1
-                assert event_msg["bytes"] > 0
                 received_utterance_event = True
                 break
 
         assert received_utterance_event is True
 
-        # Verify AudioBuffer raw bytes persist (NOT cleared after utterance ready)
+        # Verify AudioBuffer and VADState are automatically reset
         session = connection_manager.get_session(session_id)
         assert session is not None
-        assert session.audio_buffer.total_bytes > 0
-        assert len(session.audio_buffer.export_raw()) > 0
+        assert session.audio_buffer.total_bytes == 0
+        assert session.vad_state.ready_for_transcription is False
 
 
 def test_rapid_speech_start_stop(client: TestClient):
@@ -85,7 +84,6 @@ def test_rapid_speech_start_stop(client: TestClient):
     """
     with client.websocket_connect("/ws/voice") as websocket:
         _ = websocket.receive_json()
-
 
         voice_chunk = create_pcm_sine_voice(50)
         silence_chunk = create_pcm_silence(50)

@@ -5,12 +5,14 @@ Architectural Decision Rationale:
 ---------------------------------
 1. Lifespan Context Manager: Standardized startup and shutdown lifecycle management using
    async context managers (`@asynccontextmanager`). Ensures logging, ConnectionManager, AudioStreamService,
-   VADService, and global services are initialized before accepting incoming traffic.
-2. Centralized CORS Middleware: Configures `CORSMiddleware` using dynamic environment settings
+   VADService, STTProviderFactory, STTService, and global services are initialized before accepting incoming traffic.
+2. Dependency Injection: Uses `STTProviderFactory` during startup to instantiate the configured `BaseSTTProvider`
+   strategy and injects it into `STTService`.
+3. Centralized CORS Middleware: Configures `CORSMiddleware` using dynamic environment settings
    to allow secure cross-origin communication with future React frontends or mobile clients.
-3. Exception Handler Registration: Attaches custom handlers to convert unhandled exceptions
+4. Exception Handler Registration: Attaches custom handlers to convert unhandled exceptions
    or domain errors into clean, structured JSON API responses.
-4. Clean Router Inclusion: Mounts versioned and top-level routers via `root_router`.
+5. Clean Router Inclusion: Mounts versioned and top-level routers via `root_router`.
 """
 
 from collections.abc import AsyncGenerator
@@ -31,6 +33,8 @@ from app.core.exceptions import (
 from app.core.logging import get_logger, setup_logging
 from app.services.audio_stream_service import audio_stream_service
 from app.services.connection_manager import connection_manager
+from app.services.providers import STTProviderFactory
+from app.services.stt_service import stt_service
 from app.services.vad_service import vad_service
 
 # Obtain logger for application lifespan lifecycle events
@@ -46,16 +50,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging(log_level=settings.LOG_LEVEL, log_format=settings.LOG_FORMAT)
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION} in [{settings.ENV}] mode...")
 
-    # Initialize ConnectionManager, AudioStreamService, & VADService
+    # Initialize ConnectionManager, AudioStreamService, VADService, & STTService with injected provider strategy
     await connection_manager.initialize()
     await audio_stream_service.initialize()
     await vad_service.initialize()
-    logger.info("WebSocket ConnectionManager, AudioStreamService, and VADService initialized.")
+
+    # Create provider via STTProviderFactory and inject into stt_service
+    provider = STTProviderFactory.create_provider(settings.STT_PROVIDER)
+    stt_service.provider = provider
+    await stt_service.initialize()
+
+    logger.info(
+        f"WebSocket Services initialized (STT Provider: '{provider.provider_name}')."
+    )
 
     yield
 
     # Shutdown tasks
     logger.info(f"Shutting down {settings.APP_NAME}...")
+    await stt_service.shutdown()
 
 
 def create_application() -> FastAPI:
