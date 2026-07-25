@@ -5,13 +5,14 @@ Architectural Decision Rationale:
 ---------------------------------
 1. Lifespan Context Manager: Standardized startup and shutdown lifecycle management using
    async context managers (`@asynccontextmanager`). Ensures logging, ConnectionManager, AudioStreamService,
-   VADService, STTProviderFactory, STTService, and global services are initialized before accepting incoming traffic.
-2. Dependency Injection: Uses `STTProviderFactory` during startup to instantiate the configured `BaseSTTProvider`
-   strategy and injects it into `STTService`.
-3. Centralized CORS Middleware: Configures `CORSMiddleware` using dynamic environment settings
-   to allow secure cross-origin communication with future React frontends or mobile clients.
-4. Exception Handler Registration: Attaches custom handlers to convert unhandled exceptions
-   or domain errors into clean, structured JSON API responses.
+   VADService, STTProviderFactory, STTService, ConversationMemoryService, PromptBuilder, ConversationManager,
+   and ConversationService are initialized before accepting incoming traffic.
+2. Dependency Injection: Uses constructor injection to assemble business services cleanly:
+   - Provider strategy -> STTService
+   - MemoryService -> ConversationManager
+   - Manager + MemoryService + PromptBuilder -> ConversationService
+3. Centralized CORS Middleware: Configures `CORSMiddleware` using dynamic environment settings.
+4. Exception Handler Registration: Attaches custom handlers to convert unhandled exceptions or domain errors.
 5. Clean Router Inclusion: Mounts versioned and top-level routers via `root_router`.
 """
 
@@ -33,6 +34,10 @@ from app.core.exceptions import (
 from app.core.logging import get_logger, setup_logging
 from app.services.audio_stream_service import audio_stream_service
 from app.services.connection_manager import connection_manager
+from app.services.conversation_manager_service import ConversationManager
+from app.services.conversation_memory import conversation_memory_service
+from app.services.conversation_service import conversation_service
+from app.services.prompt_builder import prompt_builder
 from app.services.providers import STTProviderFactory
 from app.services.stt_service import stt_service
 from app.services.vad_service import vad_service
@@ -50,18 +55,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     setup_logging(log_level=settings.LOG_LEVEL, log_format=settings.LOG_FORMAT)
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION} in [{settings.ENV}] mode...")
 
-    # Initialize ConnectionManager, AudioStreamService, VADService, & STTService with injected provider strategy
+    # Initialize connection, audio streaming, & VAD services
     await connection_manager.initialize()
     await audio_stream_service.initialize()
     await vad_service.initialize()
 
-    # Create provider via STTProviderFactory and inject into stt_service
-    provider = STTProviderFactory.create_provider(settings.STT_PROVIDER)
-    stt_service.provider = provider
+    # Create STT provider via STTProviderFactory and inject into stt_service
+    stt_provider = STTProviderFactory.create_provider(settings.STT_PROVIDER)
+    stt_service.provider = stt_provider
     await stt_service.initialize()
 
+    # Assemble and initialize Conversation Intelligence Engine services via Dependency Injection
+    conv_mgr = ConversationManager(memory_service=conversation_memory_service)
+    conversation_service.conversation_manager = conv_mgr
+    conversation_service.memory_service = conversation_memory_service
+    conversation_service.prompt_builder = prompt_builder
+    await conversation_service.initialize()
+
     logger.info(
-        f"WebSocket Services initialized (STT Provider: '{provider.provider_name}')."
+        f"WebSocket & Conversation Intelligence Services initialized (STT Provider: '{stt_provider.provider_name}')."
     )
 
     yield

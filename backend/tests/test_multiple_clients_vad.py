@@ -66,7 +66,7 @@ def test_concurrent_clients_vad_isolation(client: TestClient):
             ack1 = ws1.receive_json()
             if ack1["vad"]["ready_for_transcription"]:
                 event_msg1 = ws1.receive_json()
-                assert event_msg1["type"] in ["transcript", "transcription_failed", "utterance_ready"]
+                assert event_msg1["type"] in ["conversation_ready", "transcript", "transcription_failed", "utterance_ready"]
                 break
 
         # Client 1 completed utterance 1; Client 2 still IDLE at 0

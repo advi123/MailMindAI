@@ -9,8 +9,8 @@ Architectural Decision Rationale:
    If an environment variable is invalid, the application fails fast before accepting traffic.
 3. 12-Factor App Compliance: All configuration can be overridden via environment variables or `.env` files,
    making deployment seamless across dev, staging, and production environments.
-4. Voice Activity Detection (VAD) & Speech-To-Text (STT) Tuning: Centralizes VAD and STT parameters
-   to enable fine-tuning of voice turn-taking and Whisper model inference without code edits.
+4. Voice Activity Detection (VAD), Speech-To-Text (STT), & Conversation Engine Tuning: Centralizes VAD,
+   STT provider settings, and conversation memory/prompt parameters without requiring code edits.
 """
 
 import json
@@ -65,6 +65,16 @@ class Settings(BaseSettings):
     STT_MAX_TRANSCRIPTION_SECONDS: float = 60.0
     STT_LANGUAGE: str = "en"
     STT_ENABLE_TRANSLATION: bool = False
+
+    # Conversation Intelligence Engine Configuration
+    MAX_CONVERSATION_HISTORY: int = 50  # Maximum total turns retained per session memory
+    DEFAULT_SYSTEM_PROMPT: str = (
+        "You are MailMind AI, a professional AI email assistant. "
+        "Be concise. Never hallucinate. Always ask for clarification if required."
+    )
+    DEFAULT_LANGUAGE: str = "en"
+    PROMPT_MAX_HISTORY: int = 10  # Maximum history turns included in constructed prompts
+    PROMPT_MAX_CHARACTERS: int = 4000  # Character safety limit for built prompts
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

@@ -1,122 +1,116 @@
 """
-MailMind AI - Conversation Orchestration Service Placeholder.
-
-Responsibility & Architectural Role:
-------------------------------------
-- Single Responsibility: High-level pipeline coordinator orchestrating the end-to-end conversational voice loop:
-  Audio Input -> VAD -> STT -> Session History -> LLM -> TTS -> Audio Response Output.
-- Decoupling: Delegates low-level tasks to specialized sub-services (AudioService, VADService, STTService, LLMService, TTSService) via Dependency Injection.
+MailMind AI - Conversation Service (Intelligence Engine Orchestrator).
 
 Architectural Decision Rationale:
 ---------------------------------
-1. Pipeline Orchestrator Pattern: Centralizes the control flow of voice conversations in a single service layer.
-   API endpoints and WebSockets interact exclusively with ConversationService, keeping transport handlers thin and decoupled.
-2. State Management Abstraction: Manages transient in-memory conversation dialog context per session.
+1. Facade & Orchestration Layer: Coordinates `ConversationManager`, `ConversationMemoryService`, and
+   `PromptBuilder` without embedding business rules directly. High-level routers depend on ConversationService.
+2. Preparation for Milestone 7 (LLM Engine): Constructs and packages the structured prompt and turn state,
+   making it ready for seamless injection into downstream LLM providers in Milestone 7.
+3. Zero LLM Calls (Milestone 6 Contract): Performs no text generation or network calls to LLMs.
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.logging import get_logger
-from app.services.audio_service import AudioService
 from app.services.base import BaseService
-from app.services.llm_service import LLMService
-from app.services.stt_service import STTService
-from app.services.tts_service import TTSService
-from app.services.vad_service import VADService
+from app.services.conversation_manager_service import ConversationManager
+from app.services.conversation_memory import ConversationMemoryService
+from app.services.prompt_builder import PromptBuilder
 
 logger = get_logger("services.conversation_service")
 
 
 class ConversationService(BaseService):
     """
-    Placeholder pipeline service that orchestrates full voice interaction workflows.
+    High-level orchestrator service coordinating transcript processing, session memory,
+    and structured prompt construction.
     """
 
     def __init__(
         self,
-        audio_service: AudioService | None = None,
-        vad_service: VADService | None = None,
-        stt_service: STTService | None = None,
-        llm_service: LLMService | None = None,
-        tts_service: TTSService | None = None,
+        conversation_manager: ConversationManager,
+        memory_service: ConversationMemoryService,
+        prompt_builder: PromptBuilder,
     ) -> None:
-        self.audio_service = audio_service or AudioService()
-        self.vad_service = vad_service or VADService()
-        self.stt_service = stt_service or STTService()
-        self.llm_service = llm_service or LLMService()
-        self.tts_service = tts_service or TTSService()
-
-        self._history: list[dict[str, str]] = []
-        self._is_initialized = False
+        self.conversation_manager: ConversationManager = conversation_manager
+        self.memory_service: ConversationMemoryService = memory_service
+        self.prompt_builder: PromptBuilder = prompt_builder
+        self._is_initialized: bool = False
 
     async def initialize(self) -> None:
-        """Initialize all underlying sub-services in sequence."""
-        logger.info("Initializing ConversationService and sub-services...")
-        await self.audio_service.initialize()
-        await self.vad_service.initialize()
-        await self.stt_service.initialize()
-        await self.llm_service.initialize()
-        await self.tts_service.initialize()
+        """Initialize ConversationService dependencies."""
+        logger.info("Initializing ConversationService engine...")
+        await self.memory_service.initialize()
+        await self.prompt_builder.initialize()
+        await self.conversation_manager.initialize()
         self._is_initialized = True
+        logger.info("ConversationService engine initialized successfully.")
 
     async def is_ready(self) -> bool:
-        """Returns True only if all dependent sub-services are initialized and ready."""
-        if not self._is_initialized:
-            return False
-        sub_readiness = await asyncio_gather_ready(
-            self.audio_service,
-            self.vad_service,
-            self.stt_service,
-            self.llm_service,
-            self.tts_service,
+        """Check operational readiness status."""
+        return (
+            self._is_initialized
+            and await self.memory_service.is_ready()
+            and await self.prompt_builder.is_ready()
+            and await self.conversation_manager.is_ready()
         )
-        return all(sub_readiness)
 
-    async def process_voice_turn(self, incoming_audio_bytes: bytes) -> dict[str, Any]:
+    async def process_transcript(
+        self, session_id: str, transcript_text: str, language: str = "en"
+    ) -> dict[str, Any]:
         """
-        Placeholder method illustrating full voice interaction flow:
-        1. Ingest audio via AudioService
-        2. Detect speech via VADService
-        3. Transcribe speech via STTService
-        4. Append to dialogue history
-        5. Generate AI response text via LLMService
-        6. Synthesize response audio via TTSService
-        7. Return turn result payload
+        Processes an incoming STT transcript by recording the turn in memory, fetching conversation history,
+        building an LLM prompt context, and returning a structured conversation payload.
+
+        :param session_id: Target session ID.
+        :param transcript_text: Raw STT transcript text string.
+        :param language: ISO language code.
+        :return: Dict payload containing session_id, turn_number, history_length, prompt, and latest_user_message.
         """
-        processed_audio = await self.audio_service.process_audio_chunk(
-            incoming_audio_bytes
+        now = datetime.now(timezone.utc)
+
+        # 1. Normalize and record user turn via ConversationManager
+        session, turn = self.conversation_manager.process_user_transcript(
+            session_id=session_id, transcript_text=transcript_text
         )
-        vad_result = await self.vad_service.detect_speech(processed_audio)
 
-        if not vad_result.get("contains_speech", False):
-            return {"status": "silence_detected", "response_audio": None}
+        # 2. Retrieve history for prompt building
+        history = self.memory_service.get_history(session_id)
+        latest_msg = turn.content if turn else ""
+        turn_num = turn.turn_number if turn else session.turn_counter
 
-        stt_result = await self.stt_service.transcribe_audio(processed_audio)
-        user_text = stt_result.get("text", "")
+        # 3. Construct formatted LLM prompt
+        built_prompt = self.prompt_builder.build_prompt(
+            history=history[:-1] if turn else history,  # Exclude current turn from history block to avoid duplication
+            current_user_message=latest_msg,
+        )
 
-        # Update dialogue history
-        self._history.append({"role": "user", "content": user_text})
+        # 4. Calculate session duration metrics
+        session_duration = (now - session.created_at).total_seconds()
 
-        llm_text = await self.llm_service.generate_response(user_text, self._history)
-        self._history.append({"role": "assistant", "content": llm_text})
-
-        tts_audio = await self.tts_service.synthesize_speech(llm_text)
+        logger.info(
+            f"Conversation Prepared | Session ID: {session_id} | Turn #: {turn_num} | "
+            f"History Size: {len(history)} turns | Prompt Length: {len(built_prompt)} chars | "
+            f"Session Duration: {session_duration:.1f}s"
+        )
 
         return {
-            "status": "success",
-            "transcription": user_text,
-            "llm_response": llm_text,
-            "response_audio": tts_audio,
+            "success": True,
+            "session_id": session_id,
+            "turn_number": turn_num,
+            "history_length": len(history),
+            "prompt": built_prompt,
+            "latest_user_message": latest_msg,
+            "timestamp": now.isoformat(),
         }
 
-    def reset_conversation(self) -> None:
-        """Clears current conversation history buffer."""
-        self._history.clear()
 
-
-async def asyncio_gather_ready(*services: BaseService) -> list[bool]:
-    """Helper utility to check readiness across multiple async services."""
-    results = []
-    for s in services:
-        results.append(await s.is_ready())
-    return results
+# Global singleton instances for application lifespan DI
+conversation_manager = ConversationManager(memory_service=ConversationMemoryService())
+conversation_service = ConversationService(
+    conversation_manager=conversation_manager,
+    memory_service=conversation_manager.memory_service,
+    prompt_builder=PromptBuilder(),
+)

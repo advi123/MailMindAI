@@ -1,5 +1,5 @@
 """
-Integration test suite verifying utterance boundary detection and transcription events over WebSocket.
+Integration test suite verifying utterance boundary detection and conversation engine processing over WebSocket.
 """
 
 import math
@@ -30,7 +30,7 @@ def test_full_utterance_lifecycle_over_websocket(client: TestClient):
     2. Stream initial silence (100ms)
     3. Stream active voice (500ms)
     4. Stream trailing silence (800ms threshold)
-    5. Assert receipt of transcript or transcription notification
+    5. Assert receipt of conversation_ready notification
     6. Verify AudioBuffer is automatically reset for the next utterance turn
     """
     with client.websocket_connect("/ws/voice") as websocket:
@@ -60,12 +60,11 @@ def test_full_utterance_lifecycle_over_websocket(client: TestClient):
             ack = websocket.receive_json()
             assert ack["type"] == "audio_ack"
 
-            # Check if transcription/utterance event follows
+            # Check if conversation event follows
             if ack["vad"]["ready_for_transcription"]:
                 event_msg = websocket.receive_json()
-                assert event_msg["type"] in ["transcript", "transcription_failed", "utterance_ready"]
+                assert event_msg["type"] in ["conversation_ready", "transcript", "transcription_failed", "utterance_ready"]
                 assert event_msg["session_id"] == session_id
-                assert event_msg["utterance_index"] == 1
                 received_utterance_event = True
                 break
 

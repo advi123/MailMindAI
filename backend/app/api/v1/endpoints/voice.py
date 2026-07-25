@@ -5,18 +5,19 @@ Architectural Decision Rationale & Audio Pipeline Integration:
 ----------------------------------------------------------------------
 1. Multiplexed Control & Streaming Data Channels: Over a single persistent WebSocket connection (`/ws/voice`),
    the endpoint automatically differentiates between:
-   - Text JSON Control Frames (ping/pong, state events, buffer/VAD clearing)
+   - Text JSON Control Frames (ping/pong, state events, buffer/VAD/conversation clearing)
    - Binary Audio Bytes Streams (raw PCM audio frame chunks)
-2. Integrated Voice Pipeline (Milestone 5 Provider Architecture):
+2. Integrated Voice Pipeline (Milestone 6 Conversation Intelligence):
    Binary Bytes -> AudioStreamService -> Session AudioBuffer
                                       -> VADService (Updates VADState)
    When VAD detects an Utterance Complete boundary:
    - Exports accumulated raw PCM bytes from `session.audio_buffer`
    - Calls `stt_service.transcribe(pcm_bytes)` (Orchestrates injected STT Provider strategy)
+   - On STT transcript -> Calls `conversation_service.process_transcript(session_id, transcript_text)`
    - Emits WebSocket Event:
-     Success -> {"type": "transcript", "session_id": ..., "text": ..., "processing_ms": ...}
+     Success -> {"type": "conversation_ready", "session_id": ..., "turn": ..., "history_length": ..., "latest_message": ..., "prompt": ...}
      Failure -> {"type": "transcription_failed", "session_id": ..., "reason": ...}
-   - Resets `session.audio_buffer` and `session.vad_state` for the next conversation turn
+   - Resets `session.audio_buffer` and `session.vad_state` for the next conversation turn.
    - Resilient: The WebSocket connection is NEVER closed on transcription failures.
 """
 
@@ -30,6 +31,7 @@ from app.core.exceptions import AppValidationError
 from app.core.logging import get_logger
 from app.services.audio_stream_service import audio_stream_service
 from app.services.connection_manager import connection_manager
+from app.services.conversation_service import conversation_service
 from app.services.stt_service import stt_service
 from app.services.vad_service import vad_service
 
@@ -42,14 +44,15 @@ router = APIRouter()
 async def voice_websocket_endpoint(websocket: WebSocket) -> None:
     """
     WebSocket endpoint supporting real-time binary audio streaming, VAD utterance boundary detection,
-    and automatic Speech-To-Text (STT) transcription.
+    Speech-To-Text (STT) transcription, and Conversation Intelligence prompt assembly.
 
     Lifecycle:
     1. Connection Handshake: Accepts socket connection and assigns a unique `session_id`.
     2. Connection Established Event: Emits welcome JSON payload containing `session_id`.
-    3. Stream Receive Loop: Receives text JSON messages or raw binary audio frames.
-    4. Utterance Processing: On VAD completion, invokes STT service, emits `transcript` JSON event, and resets session buffer.
-    5. Disconnection Cleanup: Closes session cleanly and clears session memory buffer & VAD state.
+    3. Stream Receive Loop: Receives text JSON control messages or raw binary audio frames.
+    4. Utterance Processing: On VAD completion, invokes STT service, passes transcript to Conversation Engine,
+       emits `conversation_ready` JSON event, and resets session audio buffer.
+    5. Disconnection Cleanup: Closes connection cleanly, clears audio buffer, and deletes conversation memory session.
     """
     session = await connection_manager.connect(websocket)
     session_id = session.session_id
@@ -117,6 +120,18 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
 
+                # Handle Reset VAD & Conversation Memory State Action
+                elif event_type == "reset_conversation":
+                    conversation_service.memory_service.reset_session(session_id)
+                    session.audio_buffer.clear()
+                    vad_service.reset(session.vad_state)
+                    logger.info(f"Conversation memory and VADState reset for session ID {session_id}")
+                    await websocket.send_json({
+                        "type": "conversation_reset",
+                        "session_id": session_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+
                 # Handle Reset VAD State Action
                 elif event_type == "reset_vad":
                     vad_service.reset(session.vad_state)
@@ -161,38 +176,52 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                     ack_payload["vad"] = vad_meta
                     await websocket.send_json(ack_payload)
 
-                    # 3. Check if an utterance is complete and ready for Speech-To-Text transcription
+                    # 3. Check if an utterance is complete and ready for Speech-To-Text & Conversation Processing
                     if vad_service.has_utterance_completed(session.vad_state):
                         pcm_bytes = session.audio_buffer.export_raw()
                         utterance_idx = session.vad_state.utterance_counter
 
                         logger.info(
-                            f"Utterance Completed -> Initiating STT | Session ID: {session_id} | "
-                            f"Utterance #: {utterance_idx} | PCM Bytes: {len(pcm_bytes)}"
+                            f"Utterance Completed -> Initiating STT & Conversation Processing | "
+                            f"Session ID: {session_id} | Utterance #: {utterance_idx} | PCM Bytes: {len(pcm_bytes)}"
                         )
 
                         try:
-                            # Invoke Speech-To-Text Orchestrator Service
+                            # Step 3a: Invoke Speech-To-Text Orchestrator Service
                             transcription_result = await stt_service.transcribe(
                                 audio_bytes=pcm_bytes,
                                 language=settings.STT_LANGUAGE,
                             )
 
                             if transcription_result.get("success", False):
-                                transcript_payload = {
-                                    "type": "transcript",
+                                transcript_text = transcription_result["text"]
+
+                                # Step 3b: Invoke Conversation Intelligence Engine
+                                conv_result = await conversation_service.process_transcript(
+                                    session_id=session_id,
+                                    transcript_text=transcript_text,
+                                    language=settings.STT_LANGUAGE,
+                                )
+
+                                # NOTE: The prompt field is included in conversation_ready payload for development/testing
+                                # visibility. Production builds should omit or sanitize raw prompt strings before deployment.
+                                conversation_ready_payload = {
+                                    "type": "conversation_ready",
                                     "session_id": session_id,
-                                    "utterance_index": utterance_idx,
-                                    "text": transcription_result["text"],
-                                    "processing_ms": transcription_result["processing_ms"],
-                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "turn": conv_result["turn_number"],
+                                    "history_length": conv_result["history_length"],
+                                    "latest_message": conv_result["latest_user_message"],
+                                    "prompt": conv_result["prompt"],
+                                    "timestamp": conv_result["timestamp"],
                                 }
 
                                 logger.info(
-                                    f"Transcript Emitted | Session ID: {session_id} | "
-                                    f"Utterance #: {utterance_idx} | Text: '{transcription_result['text']}'"
+                                    f"Conversation Ready Emitted | Session ID: {session_id} | "
+                                    f"Turn #: {conv_result['turn_number']} | History: {conv_result['history_length']} turns | "
+                                    f"Latest Msg: '{conv_result['latest_user_message']}'"
                                 )
-                                await websocket.send_json(transcript_payload)
+                                await websocket.send_json(conversation_ready_payload)
+
                             else:
                                 logger.warning(
                                     f"Transcription Provider Failure Payload | Session ID: {session_id} | "
@@ -209,7 +238,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                         except Exception as stt_err:
                             logger.exception(
-                                f"Unexpected Transcription Failure | Session ID: {session_id}"
+                                f"Unexpected Voice Pipeline Failure | Session ID: {session_id}"
                             )
                             failure_payload = {
                                 "type": "transcription_failed",
@@ -256,5 +285,6 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
             f"Unexpected WebSocket error for session ID {session_id}"
         )
     finally:
-        # Step 4: Ensure session cleanup, clearing audio buffer and logging active duration
+        # Step 4: Clean up connection registry and delete conversation memory session
+        conversation_service.memory_service.delete_session(session_id)
         await connection_manager.disconnect(session_id)

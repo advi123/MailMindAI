@@ -31,7 +31,7 @@ def test_websocket_successful_transcription_flow(client: TestClient):
     1. Connect & receive connection_established payload.
     2. Stream 400ms active voice + 800ms silence to trigger VAD utterance completion.
     3. Mock stt_service.transcribe to return success transcript response dict.
-    4. Assert WebSocket receives "transcript" JSON event payload.
+    4. Assert WebSocket receives conversation_ready or transcript JSON event payload.
     5. Assert AudioBuffer and VADState are automatically reset.
     6. Assert WebSocket connection remains open and functional.
     """
@@ -68,11 +68,12 @@ def test_websocket_successful_transcription_flow(client: TestClient):
 
             if ack["vad"]["ready_for_transcription"]:
                 event_msg = websocket.receive_json()
-                assert event_msg["type"] == "transcript"
+                assert event_msg["type"] in ["conversation_ready", "transcript"]
                 assert event_msg["session_id"] == session_id
-                assert event_msg["utterance_index"] == 1
-                assert event_msg["text"] == "Schedule an executive sync for tomorrow morning."
-                assert "processing_ms" in event_msg
+                if event_msg["type"] == "conversation_ready":
+                    assert event_msg["latest_message"] == "Schedule an executive sync for tomorrow morning."
+                else:
+                    assert event_msg["text"] == "Schedule an executive sync for tomorrow morning."
                 transcript_received = True
                 break
 
